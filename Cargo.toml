@@ -1,0 +1,12 @@
+[package]
+name = "dive"
+version = "0.0.1"
+authors = [ "Jason Greene" ]
+edition = "2021"
+
+[dependencies]
+caps = "0.5.5"
+libc = "0.2.148"
+nix = {version = "0.27.1", features=["process", "user", "sched", "fs"]}
+sysinfo = "0.29.10"
+zip = "0.6.6"
