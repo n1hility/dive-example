@@ -12,8 +12,13 @@ dives into them and analyzes their jar files
 
 2. Install musl-gcc and gmake
     ```
+    # linux
     sudo dnf install -y musl-gcc make
+
+    # osx
+    brew install filosottile/musl-cross/musl-cross
     ```
+
 
 3. Install x86_64-unknown-linux-musl target
     ```
@@ -23,7 +28,7 @@ dives into them and analyzes their jar files
 4. Build
     ```
     $ make
-    cargo build --release --target x86_64-unknown-linux-musl
+    cargo build --release 
     Finished release [optimized] target(s) in 9.25s
     ```
 
