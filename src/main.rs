@@ -1,13 +1,15 @@
+use caps::errors::CapsError;
 use caps::{has_cap, CapSet, Capability};
+use nix::errno::Errno;
 use nix::sched::setns;
 use nix::{
     sched::CloneFlags,
     sys::wait::{waitpid, WaitStatus},
     unistd::{execv, fork, seteuid, ForkResult},
 };
-use std::ffi::CString;
+use std::ffi::{CString, NulError};
 use std::os::fd::{AsFd, BorrowedFd};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::{
     collections::HashMap,
     env::{self, current_exe},
@@ -17,9 +19,53 @@ use std::{
     process,
 };
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
+use zip::result::ZipError;
 use zip::{self, ZipArchive};
 
-fn main() {
+#[derive(Debug)]
+pub enum Error {
+    Io(io::Error),
+    Zip(ZipError),
+    Null(NulError),
+    Caps(CapsError),
+    Errno(&'static str, Errno),
+}
+
+// there exists a `derive_more` crate that can help remove
+// this sort of boilerplate.
+
+impl From<io::Error> for Error {
+    fn from(inner: io::Error) -> Self {
+        Self::Io(inner)
+    }
+}
+
+impl From<ZipError> for Error {
+    fn from(inner: ZipError) -> Self {
+        Self::Zip(inner)
+    }
+}
+
+impl From<NulError> for Error {
+    fn from(inner: NulError) -> Self {
+        Self::Null(inner)
+    }
+}
+
+impl From<CapsError> for Error {
+    fn from(inner: CapsError) -> Self {
+        Self::Caps(inner)
+    }
+}
+
+impl From<(&'static str, Errno)> for Error {
+    fn from(inner: (&'static str, Errno)) -> Self {
+        Self::Errno(inner.0, inner.1)
+    }
+}
+
+fn main() -> Result<(), Error> {
+    // check out the `clap` crate and it's `derive` feature.
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && args[1] == "scan" {
         println!("Scanning...");
@@ -38,7 +84,7 @@ fn main() {
     //    audited
 
     // Verify this code is running with root level perms
-    check_perms();
+    check_perms()?;
 
     // For caution (see rules 2,3) this should be replaced with manual proc scanning
     let s = System::new_all();
@@ -54,9 +100,14 @@ fn main() {
                 **uid,
                 cmd.join(" ")
             );
-            fork_scanner(**uid, pid.as_u32(), cmd)
+
+            if let Err(e) = fork_scanner(**uid, pid.as_u32(), cmd) {
+                println!("{:?}", e);
+            }
         }
     }
+
+    Ok(())
 }
 
 fn match_first(strings: &[String], search: &str) -> bool {
@@ -68,7 +119,7 @@ fn match_first(strings: &[String], search: &str) -> bool {
 }
 
 // Simple example that finds a classpath and looks for name and version info
-fn scan(args: Vec<String>) {
+fn scan(args: Vec<String>) -> Result<(), Error> {
     let mut i = 0;
     let mut map = HashMap::new();
     loop {
@@ -82,9 +133,8 @@ fn scan(args: Vec<String>) {
             i += 1;
             let paths = args.get(i).unwrap().split(':');
             for path in paths {
-                let p = Path::new(path);
-                if p.is_file() {
-                    analyze_manifest(path, &mut map);
+                if Path::new(path).is_file() {
+                    analyze_manifest(path, &mut map)?;
                 }
             }
         }
@@ -94,62 +144,62 @@ fn scan(args: Vec<String>) {
     for (key, value) in map {
         println!("FOUND: {key} - {value}")
     }
+
+    Ok(())
 }
 
-fn analyze_manifest(path: &str, hits: &mut HashMap<String, String>) {
-    let zipfile = std::fs::File::open(path).unwrap();
-    let mut arc = ZipArchive::new(zipfile).expect("ahh zips");
-    let file = match arc.by_name("META-INF/MANIFEST.MF") {
-        Ok(file) => file,
-        Err(..) => {
-            println!("no manifest found");
-            return;
-        }
-    };
+fn analyze_manifest(path: &str, hits: &mut HashMap<String, String>) -> Result<(), ZipError> {
+    let zipfile = File::open(path).unwrap();
+    let mut arc = ZipArchive::new(zipfile)?;
 
-    let mut map = HashMap::new();
-    let lines = io::BufReader::new(file).lines();
-    for line in lines.flatten() {
-        let c: Vec<&str> = line.split(':').collect();
+    if let Ok(file) = arc.by_name("META-INF/MANIFEST.MF") {
+        let mut map = HashMap::new();
+        let lines = io::BufReader::new(file).lines();
+        for line in lines.flatten() {
+            let c: Vec<&str> = line.split(':').collect();
 
-        if c.len() > 1 {
-            let key = c.first().unwrap().trim();
-            let value = c.get(1).unwrap().trim();
-            map.insert(key.to_string(), value.to_string());
+            if c.len() > 1 {
+                let key = c.first().unwrap().trim();
+                let value = c.get(1).unwrap().trim();
+                map.insert(key.to_string(), value.to_string());
+            }
         }
+
+        if let Some(title) = map.get("Implementation-Title").or(map.get("Bundle-Name")) {
+            let version = match map.get("Implementation-Version") {
+                Some(v) => v,
+                None => "no version",
+            };
+
+            hits.insert(title.to_string(), version.to_string());
+        }
+    } else {
+        println!("no manifest found");
     }
 
-    if let Some(title) = map.get("Implementation-Title").or(map.get("Bundle-Name")) {
-        let version = match map.get("Implementation-Version") {
-            Some(v) => v,
-            None => "no version",
-        };
-
-        hits.insert(title.to_string(), version.to_string());
-    }
+    Ok(())
 }
 
-fn check_perms() {
-    let suid =
-        has_cap(None, CapSet::Effective, Capability::CAP_SETUID).expect("Error reading CAP_SETUID");
+fn check_perms() -> Result<(), Error> {
+    let suid = has_cap(None, CapSet::Effective, Capability::CAP_SETUID)?;
     let sys = has_cap(None, CapSet::Effective, Capability::CAP_SYS_ADMIN)
         .expect("Error reading CAP_SYS_ADMIN");
 
     if !suid {
-        println!("Error: you must have CAP_SETUID! (are you root?)");
-        process::exit(1)
+        return Err(CapsError::from("you must have CAP_SETUID").into());
     }
 
     if !sys {
-        println!("Error: you must have CAP_SYS_ADMIN! (are you root?)");
-        process::exit(1)
+        return Err(CapsError::from("you must have CAP_SYS_ADMIN").into());
     }
+
+    Ok(())
 }
 
-fn program_dir() -> std::path::PathBuf {
-    let mut path = current_exe().expect("could not determine program dir");
+fn program_dir() -> Result<PathBuf, io::Error> {
+    let mut path = current_exe()?;
     path.pop();
-    path
+    Ok(path)
 }
 
 fn program_name() -> String {
@@ -162,39 +212,49 @@ fn program_name() -> String {
         .unwrap();
 }
 
-fn join_namespace(pid: u32) {
+fn join_namespace(pid: u32) -> Result<(), Error> {
     let s = format!("/proc/{}/ns/mnt", pid);
     let f = File::open(&s).expect("could not open mount namespace");
     let fd: BorrowedFd<'_> = f.as_fd();
 
     println!("Setting ns: {s}");
     if let Err(e) = setns(fd, CloneFlags::CLONE_NEWNS) {
-        println!("error: could not switch to mount ns: {e}");
-        process::exit(1)
+        //println!("error: could not switch to mount ns: {e}");
+        //process::exit(1)
+        Err(Error::from(("could not switch to mount ns", e)))
+    } else {
+        Ok(())
     }
 }
 
-fn switch_user(uid: u32) {
+fn switch_user(uid: u32) -> Result<(), Error> {
     println!("Becoming user: {uid}");
     if let Err(e) = seteuid(uid.into()) {
-        println!("error: could not switch to uid {uid}: {e}");
-        process::exit(1)
+        //println!("error: could not switch to uid {uid}: {e}");
+        //process::exit(1)
+        Err(("could not switch to uid {uid}", e).into())
+    } else {
+        Ok(())
     }
 }
 
-fn open_directory() -> File {
+fn open_directory() -> Result<File, io::Error> {
     println!("Setting up directory FD");
 
-    match File::open(program_dir()) {
+    /*
+    match File::open(program_dir()?) {
         Err(e) => {
             println!("Error: could not open program dir: {e}");
             process::exit(1);
         }
-        Ok(f) => f,
+        Ok(f) => Ok(f),
     }
+     */
+
+    File::open(program_dir()?)
 }
 
-fn self_exec(dir_fd: File, program: String, cmd: &[String]) {
+fn self_exec(dir_fd: File, program: String, cmd: &[String]) -> Result<(), Error> {
     println!("Self executing...");
 
     if let Err(e) = nix::unistd::fchdir(dir_fd.as_raw_fd()) {
@@ -202,23 +262,25 @@ fn self_exec(dir_fd: File, program: String, cmd: &[String]) {
         process::exit(1)
     }
 
-    let path = CString::new(format!("./{}", program)).unwrap();
+    let path = CString::new(format!("./{}", program))?;
 
     let mut cvec = Vec::with_capacity(2 + cmd.len());
     cvec.push(path.clone());
-    cvec.push(CString::new("scan").unwrap());
+    cvec.push(CString::new("scan")?);
 
     for s in cmd {
-        cvec.push(CString::new(s.as_str()).unwrap());
+        cvec.push(CString::new(s.as_str())?);
     }
 
     if let Err(e) = execv(&path, cvec.as_slice()) {
-        println!("Error: could not self-exec {}: {e}", path.to_str().unwrap());
+        println!("Error: could not self-exec {:?}: {e}", path);
         process::exit(1);
     }
+
+    Ok(())
 }
 
-fn fork_scanner(uid: u32, pid: u32, cmd: &[String]) {
+fn fork_scanner(uid: u32, pid: u32, cmd: &[String]) -> Result<(), Error> {
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child, .. }) => {
             println!(
@@ -242,21 +304,23 @@ fn fork_scanner(uid: u32, pid: u32, cmd: &[String]) {
 
             // Hold open the program directoy so that it can be utilized as an orphan outside
             // the container FS
-            let dir_fd = open_directory();
+            let dir_fd = open_directory()?;
 
             // Swap the child processes mount namespace with the container
-            join_namespace(pid);
+            join_namespace(pid)?;
 
             // Become the same user that is running the process
-            switch_user(uid);
+            switch_user(uid)?;
 
             // Rexecute ourself, so that scanning operations can be safely performed:
             // unprivileged and using threads if necessary.
             //
             // This could also be replaced with another non-Rust program, provided it
             // is staticly linked.
-            self_exec(dir_fd, program, cmd);
+            self_exec(dir_fd, program, cmd)?;
         }
         Err(e) => println!("Error: Fork failed: {e}"),
     }
+
+    Ok(())
 }
