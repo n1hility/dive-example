@@ -59,8 +59,8 @@ impl From<CapsError> for Error {
 }
 
 impl From<(&'static str, Errno)> for Error {
-    fn from(inner: (&'static str, Errno)) -> Self {
-        Self::Errno(inner.0, inner.1)
+    fn from((message, errno): (&'static str, Errno)) -> Self {
+        Self::Errno(message, errno)
     }
 }
 
