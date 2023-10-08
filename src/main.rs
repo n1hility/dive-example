@@ -218,8 +218,6 @@ fn join_namespace(pid: u32) -> Result<(), Error> {
 
     println!("Setting ns: {s}");
     if let Err(e) = setns(fd, CloneFlags::CLONE_NEWNS) {
-        //println!("error: could not switch to mount ns: {e}");
-        //process::exit(1)
         Err(Error::from(("could not switch to mount ns", e)))
     } else {
         Ok(())
@@ -229,8 +227,6 @@ fn join_namespace(pid: u32) -> Result<(), Error> {
 fn switch_user(uid: u32) -> Result<(), Error> {
     println!("Becoming user: {uid}");
     if let Err(e) = seteuid(uid.into()) {
-        //println!("error: could not switch to uid {uid}: {e}");
-        //process::exit(1)
         Err(("could not switch to uid {uid}", e).into())
     } else {
         Ok(())
@@ -239,16 +235,6 @@ fn switch_user(uid: u32) -> Result<(), Error> {
 
 fn open_directory() -> Result<File, io::Error> {
     println!("Setting up directory FD");
-
-    /*
-    match File::open(program_dir()?) {
-        Err(e) => {
-            println!("Error: could not open program dir: {e}");
-            process::exit(1);
-        }
-        Ok(f) => Ok(f),
-    }
-     */
 
     File::open(program_dir()?)
 }
