@@ -7,6 +7,7 @@ use nix::{
     sys::wait::{waitpid, WaitStatus},
     unistd::{execv, fork, seteuid, ForkResult},
 };
+use rc_zip::prelude::ReadZip;
 use std::ffi::{CString, NulError};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::{Path, PathBuf};
@@ -19,13 +20,12 @@ use std::{
     process,
 };
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
-use zip::result::ZipError;
-use zip::{self, ZipArchive};
+
 
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    Zip(ZipError),
+    Zip(rc_zip::Error),
     Null(NulError),
     Caps(CapsError),
     Errno(&'static str, Errno),
@@ -40,8 +40,8 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<ZipError> for Error {
-    fn from(inner: ZipError) -> Self {
+impl From<rc_zip::Error> for Error {
+    fn from(inner: rc_zip::Error) -> Self {
         Self::Zip(inner)
     }
 }
@@ -148,13 +148,12 @@ fn scan(args: Vec<String>) -> Result<(), Error> {
     Ok(())
 }
 
-fn analyze_manifest(path: &str, hits: &mut HashMap<String, String>) -> Result<(), ZipError> {
+fn analyze_manifest(path: &str, hits: &mut HashMap<String, String>) -> Result<(), rc_zip::Error> {
     let zipfile = File::open(path).unwrap();
-    let mut arc = ZipArchive::new(zipfile)?;
-
-    if let Ok(file) = arc.by_name("META-INF/MANIFEST.MF") {
+    let arc = zipfile.read_zip()?;
+    if let Some(entry) = arc.by_name("META-INF/MANIFEST.MF") {
         let mut map = HashMap::new();
-        let lines = io::BufReader::new(file).lines();
+        let lines = io::BufReader::new(entry.reader()).lines();
         for line in lines.flatten() {
             let c: Vec<&str> = line.split(':').collect();
 
