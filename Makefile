@@ -2,6 +2,7 @@
 build: export RUSTFLAGS=-C target-feature=+crt-static
 build:
 	cargo build --release --target x86_64-unknown-linux-musl
+	cargo build --release --target aarch64-unknown-linux-musl
 
 .PHONY: clean
 clean:
