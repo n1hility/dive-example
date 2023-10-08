@@ -20,6 +20,6 @@ COPY --from=stage1 /tmp/target/x86_64-unknown-linux-musl/release/dive /dive-amd6
 RUN echo $BUILDPLATFORM $TARGETPLATFORM $BUILDARCH $TARGETARCH
 RUN bash -c 'if [ "$TARGETARCH" == "arm64" ]; then ln /dive-arm64 /dive; else ln /dive-amd64 /dive; fi'
 
-FROM fedora 
+FROM scratch
 COPY --from=stage2 /dive /dive
 CMD ["/dive"]
